@@ -1,23 +1,27 @@
 import adsk.core
+import adsk.fusion
 import os
 from ...lib import fusionAddInUtils as futil
 from ... import config
+from ...lib.bosses import PRESETS, get_preset
+from ...lib.bosses.generator import BossGenerationContext, generate_bosses
+from ...lib.bosses.validation import validate_preset, validate_selected_points
+
 app = adsk.core.Application.get()
 ui = app.userInterface
 
 
-# TODO *** Specify the command identity information. ***
-CMD_ID = f'{config.COMPANY_NAME}_{config.ADDIN_NAME}_cmdDialog'
-CMD_NAME = 'Command Dialog Sample'
-CMD_Description = 'A Fusion Add-in Command with a dialog'
+CMD_ID = f'{config.COMPANY_NAME}_{config.ADDIN_NAME}_createPcbBoss'
+CMD_NAME = 'Create PCB Boss'
+CMD_Description = 'Create PCB screw bosses from selected sketch points'
+
+PRESET_INPUT_ID = 'preset_dropdown'
+POINTS_INPUT_ID = 'boss_center_points'
+STATUS_INPUT_ID = 'status_box'
 
 # Specify that the command will be promoted to the panel.
 IS_PROMOTED = True
 
-# TODO *** Define the location where the command button will be created. ***
-# This is done by specifying the workspace, the tab, and the panel, and the 
-# command it will be inserted beside. Not providing the command to position it
-# will insert it at the end.
 WORKSPACE_ID = 'FusionSolidEnvironment'
 PANEL_ID = 'SolidScriptsAddinsPanel'
 COMMAND_BESIDE_ID = 'ScriptsManagerCommand'
@@ -69,89 +73,170 @@ def stop():
         command_definition.deleteMe()
 
 
-# Function that is called when a user clicks the corresponding button in the UI.
-# This defines the contents of the command dialog and connects to the command related events.
+def _selected_preset_id(inputs: adsk.core.CommandInputs) -> str:
+    dropdown = adsk.core.DropDownCommandInput.cast(inputs.itemById(PRESET_INPUT_ID))
+    if not dropdown or not dropdown.selectedItem:
+        return ''
+
+    selected_label = dropdown.selectedItem.name
+    for preset_id, preset in PRESETS.items():
+        if preset.display_name == selected_label:
+            return preset_id
+
+    return ''
+
+
+def _selected_sketch_points(inputs: adsk.core.CommandInputs):
+    selection_input = adsk.core.SelectionCommandInput.cast(inputs.itemById(POINTS_INPUT_ID))
+    if not selection_input:
+        return []
+
+    points = []
+    for i in range(selection_input.selectionCount):
+        entity = selection_input.selection(i).entity
+        sketch_point = adsk.fusion.SketchPoint.cast(entity)
+        if sketch_point:
+            points.append(sketch_point)
+    return points
+
+
+def _set_status(inputs: adsk.core.CommandInputs, message: str):
+    status_input = adsk.core.TextBoxCommandInput.cast(inputs.itemById(STATUS_INPUT_ID))
+    if status_input:
+        status_input.text = message
+
+
+def _refresh_status(inputs: adsk.core.CommandInputs):
+    preset_id = _selected_preset_id(inputs)
+    points = _selected_sketch_points(inputs)
+
+    if not preset_id:
+        _set_status(inputs, 'Choose a screw preset.')
+        return
+
+    preset = get_preset(preset_id)
+    status = (
+        f'Preset: {preset.display_name}<br>'
+        f'Selected points: {len(points)}<br>'
+        f'OD {preset.outer_diameter_mm:.2f} mm, height {preset.boss_height_mm:.2f} mm'
+    )
+
+    valid_points, points_message = validate_selected_points(points)
+    if not valid_points:
+        status += f'<br>{points_message}'
+
+    preset_error = validate_preset(preset)
+    if preset_error:
+        status += f'<br>{preset_error}'
+
+    _set_status(inputs, status)
+
+
 def command_created(args: adsk.core.CommandCreatedEventArgs):
-    # General logging for debug.
     futil.log(f'{CMD_NAME} Command Created Event')
 
-    # https://help.autodesk.com/view/fusion360/ENU/?contextId=CommandInputs
     inputs = args.command.commandInputs
 
-    # TODO Define the dialog for your command by adding different inputs to the command.
+    preset_input = inputs.addDropDownCommandInput(
+        PRESET_INPUT_ID,
+        'Screw Model',
+        adsk.core.DropDownStyles.TextListDropDownStyle,
+    )
 
-    # Create a simple text box input.
-    inputs.addTextBoxCommandInput('text_box', 'Some Text', 'Enter some text.', 1, False)
+    is_first = True
+    for preset in PRESETS.values():
+        preset_input.listItems.add(preset.display_name, is_first)
+        is_first = False
 
-    # Create a value input field and set the default using 1 unit of the default length unit.
-    defaultLengthUnits = app.activeProduct.unitsManager.defaultLengthUnits
-    default_value = adsk.core.ValueInput.createByString('1')
-    inputs.addValueInput('value_input', 'Some Value', defaultLengthUnits, default_value)
+    selection_input = inputs.addSelectionInput(
+        POINTS_INPUT_ID,
+        'Boss Centers',
+        'Select one or more sketch points from a single sketch',
+    )
+    selection_input.addSelectionFilter('SketchPoints')
+    selection_input.setSelectionLimits(1, 0)
 
-    # TODO Connect to the events that are needed by this command.
+    inputs.addTextBoxCommandInput(
+        STATUS_INPUT_ID,
+        'Status',
+        'Select one or more sketch points.',
+        4,
+        True,
+    )
+
+    _refresh_status(inputs)
+
     futil.add_handler(args.command.execute, command_execute, local_handlers=local_handlers)
     futil.add_handler(args.command.inputChanged, command_input_changed, local_handlers=local_handlers)
-    futil.add_handler(args.command.executePreview, command_preview, local_handlers=local_handlers)
     futil.add_handler(args.command.validateInputs, command_validate_input, local_handlers=local_handlers)
     futil.add_handler(args.command.destroy, command_destroy, local_handlers=local_handlers)
 
 
-# This event handler is called when the user clicks the OK button in the command dialog or 
-# is immediately called after the created event not command inputs were created for the dialog.
 def command_execute(args: adsk.core.CommandEventArgs):
-    # General logging for debug.
     futil.log(f'{CMD_NAME} Command Execute Event')
 
-    # TODO ******************************** Your code here ********************************
-
-    # Get a reference to your command's inputs.
-    inputs = args.command.commandInputs
-    text_box: adsk.core.TextBoxCommandInput = inputs.itemById('text_box')
-    value_input: adsk.core.ValueCommandInput = inputs.itemById('value_input')
-
-    # Do something interesting
-    text = text_box.text
-    expression = value_input.expression
-    msg = f'Your text: {text}<br>Your value: {expression}'
-    ui.messageBox(msg)
-
-
-# This event handler is called when the command needs to compute a new preview in the graphics window.
-def command_preview(args: adsk.core.CommandEventArgs):
-    # General logging for debug.
-    futil.log(f'{CMD_NAME} Command Preview Event')
     inputs = args.command.commandInputs
 
+    preset_id = _selected_preset_id(inputs)
+    if not preset_id:
+        ui.messageBox('No screw preset selected.')
+        return
 
-# This event handler is called when the user changes anything in the command dialog
-# allowing you to modify values of other inputs based on that change.
+    points = _selected_sketch_points(inputs)
+    valid_points, points_message = validate_selected_points(points)
+    if not valid_points:
+        ui.messageBox(points_message)
+        return
+
+    preset = get_preset(preset_id)
+    preset_error = validate_preset(preset)
+    if preset_error:
+        ui.messageBox(preset_error)
+        return
+
+    first_sketch = points[0].parentSketch
+    component = first_sketch.parentComponent
+
+    context = BossGenerationContext(
+        component=component,
+        sketch=first_sketch,
+        preset=preset,
+    )
+
+    try:
+        created_bodies = generate_bosses(context, points)
+        ui.messageBox(f'Created {len(created_bodies)} PCB boss(es).')
+    except Exception:
+        futil.handle_error('createBoss.command_execute')
+
+
 def command_input_changed(args: adsk.core.InputChangedEventArgs):
     changed_input = args.input
-    inputs = args.inputs
-
-    # General logging for debug.
     futil.log(f'{CMD_NAME} Input Changed Event fired from a change to {changed_input.id}')
+    _refresh_status(args.inputs)
 
 
-# This event handler is called when the user interacts with any of the inputs in the dialog
-# which allows you to verify that all of the inputs are valid and enables the OK button.
 def command_validate_input(args: adsk.core.ValidateInputsEventArgs):
-    # General logging for debug.
     futil.log(f'{CMD_NAME} Validate Input Event')
 
     inputs = args.inputs
-    
-    # Verify the validity of the input values. This controls if the OK button is enabled or not.
-    valueInput = inputs.itemById('value_input')
-    if valueInput.value >= 0:
-        args.areInputsValid = True
-    else:
+
+    preset_id = _selected_preset_id(inputs)
+    if not preset_id:
         args.areInputsValid = False
+        return
+
+    preset = get_preset(preset_id)
+    if validate_preset(preset):
+        args.areInputsValid = False
+        return
+
+    points = _selected_sketch_points(inputs)
+    points_ok, _ = validate_selected_points(points)
+    args.areInputsValid = points_ok
         
 
-# This event handler is called when the command terminates.
 def command_destroy(args: adsk.core.CommandEventArgs):
-    # General logging for debug.
     futil.log(f'{CMD_NAME} Command Destroy Event')
 
     global local_handlers
