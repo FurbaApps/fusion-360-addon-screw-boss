@@ -140,7 +140,7 @@ def generate_bosses(context: BossGenerationContext, points: Iterable[adsk.fusion
             component,
             profile,
             height_cm,
-            adsk.fusion.FeatureOperations.NewBodyFeatureOperation,
+            adsk.fusion.FeatureOperations.JoinFeatureOperation,
         )
         body = extrude.bodies.item(0)
         top_face = _first_planar_face(extrude.endFaces)
