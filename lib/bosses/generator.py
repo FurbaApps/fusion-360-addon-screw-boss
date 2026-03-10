@@ -35,12 +35,13 @@ def _create_extrude(
     profile: adsk.fusion.Profile,
     distance_cm: float,
     operation: adsk.fusion.FeatureOperations,
+    direction: adsk.fusion.ExtentDirections = adsk.fusion.ExtentDirections.PositiveExtentDirection,
 ) -> adsk.fusion.ExtrudeFeature:
     extrudes = component.features.extrudeFeatures
     ext_input = extrudes.createInput(profile, operation)
     distance_input = adsk.core.ValueInput.createByReal(distance_cm)
     extent = adsk.fusion.DistanceExtentDefinition.create(distance_input)
-    ext_input.setOneSideExtent(extent, adsk.fusion.ExtentDirections.PositiveExtentDirection)
+    ext_input.setOneSideExtent(extent, direction)
     return extrudes.add(ext_input)
 
 
@@ -95,7 +96,13 @@ def _cut_circle_on_face(
     center_sketch = sketch.modelToSketchSpace(center_world)
     circle = sketch.sketchCurves.sketchCircles.addByCenterRadius(center_sketch, diameter_cm / 2.0)
     profile = _profile_for_circle(sketch, circle)
-    _create_extrude(component, profile, depth_cm, adsk.fusion.FeatureOperations.CutFeatureOperation)
+    _create_extrude(
+        component,
+        profile,
+        depth_cm,
+        adsk.fusion.FeatureOperations.CutFeatureOperation,
+        adsk.fusion.ExtentDirections.NegativeExtentDirection,
+    )
 
 
 def _top_face_for_center(
@@ -132,7 +139,7 @@ def _top_face_for_center(
 
 def generate_bosses(context: BossGenerationContext, points: Iterable[adsk.fusion.SketchPoint]) -> List[adsk.fusion.BRepBody]:
     component = context.component
-    sketch = context.sketch
+    source_sketch = context.sketch
     preset = context.preset
 
     height_cm = _mm_to_cm(preset.boss_height_mm)
@@ -143,17 +150,22 @@ def generate_bosses(context: BossGenerationContext, points: Iterable[adsk.fusion
     main_depth_cm = _mm_to_cm(preset.main_hole_depth_from_top_mm)
     fillet_radius_cm = _mm_to_cm(preset.base_fillet_mm)
 
-    normal = sketch.referencePlane.geometry.normal.copy()
+    normal = source_sketch.referencePlane.geometry.normal.copy()
     normal.normalize()
 
     created_bodies: List[adsk.fusion.BRepBody] = []
 
     for point in points:
         center_sketch = point.geometry
-        center_world = sketch.sketchToModelSpace(center_sketch)
+        center_world = source_sketch.sketchToModelSpace(center_sketch)
 
-        circle = sketch.sketchCurves.sketchCircles.addByCenterRadius(center_sketch, outer_radius_cm)
-        profile = _profile_for_circle(sketch, circle)
+        # Build the boss profile in a dedicated sketch so existing wall/outline geometry
+        # cannot cause Fusion to pick a large surrounding profile.
+        boss_sketch = component.sketches.add(source_sketch.referencePlane)
+        center_on_boss_sketch = boss_sketch.modelToSketchSpace(center_world)
+
+        circle = boss_sketch.sketchCurves.sketchCircles.addByCenterRadius(center_on_boss_sketch, outer_radius_cm)
+        profile = _profile_for_circle(boss_sketch, circle)
 
         extrude = _create_extrude(
             component,
