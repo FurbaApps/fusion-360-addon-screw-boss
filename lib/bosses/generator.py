@@ -114,17 +114,37 @@ def _base_and_top_faces(
     return end_face, start_face
 
 
-def _resolve_target_body(component: adsk.fusion.Component) -> adsk.fusion.BRepBody:
+def _distance_point_to_bbox(point: adsk.core.Point3D, bbox: adsk.core.BoundingBox3D) -> float:
+    dx = max(bbox.minPoint.x - point.x, 0.0, point.x - bbox.maxPoint.x)
+    dy = max(bbox.minPoint.y - point.y, 0.0, point.y - bbox.maxPoint.y)
+    dz = max(bbox.minPoint.z - point.z, 0.0, point.z - bbox.maxPoint.z)
+    return (dx * dx + dy * dy + dz * dz) ** 0.5
+
+
+def _resolve_target_body_near_point(component: adsk.fusion.Component, near_point: adsk.core.Point3D) -> adsk.fusion.BRepBody:
+    best_body = None
+    best_distance = None
+
     for body in component.bRepBodies:
-        if body.isSolid:
-            return body
-    raise RuntimeError('No solid target body found in active component.')
+        if not body.isSolid:
+            continue
+
+        distance = _distance_point_to_bbox(near_point, body.boundingBox)
+        if best_distance is None or distance < best_distance:
+            best_distance = distance
+            best_body = body
+
+    if not best_body:
+        raise RuntimeError('No solid target body found near selected boss point.')
+
+    return best_body
 
 
 def _resolve_top_face_on_body(
     body: adsk.fusion.BRepBody,
     base_point: adsk.core.Point3D,
     target_radius_cm: float,
+    boss_height_cm: float,
 ) -> adsk.fusion.BRepFace:
     refs = []
 
@@ -149,6 +169,12 @@ def _resolve_top_face_on_body(
 
     if not refs:
         raise RuntimeError('Could not resolve boss circular top face on joined body.')
+
+    # Keep only circular faces local to the selected boss point.
+    local_threshold = boss_height_cm + 0.05
+    local_refs = [item for item in refs if item[1] <= local_threshold]
+    if local_refs:
+        refs = local_refs
 
     refs.sort(key=lambda item: item[1])
     return refs[-1][0]
@@ -275,8 +301,8 @@ def generate_bosses(context: BossGenerationContext, points: Iterable[adsk.fusion
             adsk.fusion.FeatureOperations.JoinFeatureOperation,
         )
 
-        body = _resolve_target_body(component)
-        top_face = _resolve_top_face_on_body(body, center_world, outer_radius_cm)
+        body = _resolve_target_body_near_point(component, center_world)
+        top_face = _resolve_top_face_on_body(body, center_world, outer_radius_cm, height_cm)
         top_center_world = _circle_center_on_face(top_face, outer_radius_cm)
 
         _create_counterbore_hole(
