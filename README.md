@@ -8,9 +8,10 @@ Current workflow:
 
 1. Launch `Screw Boss` from the Fusion UI.
 2. Choose a screw preset (currently `Bossard 8110867`).
-3. Select one or more sketch points from a single sketch.
-4. Confirm the command.
-5. The add-in creates bosses with:
+3. Set `Boss Height` in mm (defaults to the preset minimum and can be increased).
+4. Select one or more sketch points from a single sketch.
+5. Confirm the command.
+6. The add-in creates bosses with:
    - joined cylindrical boss body
    - counterbore hole (used for relief)
    - main hole depth
@@ -63,6 +64,7 @@ Fallback behavior exists where Fusion API variants differ (for example, input se
 
 All internal geometry values are converted to Fusion internal design units (cm).
 Preset values are stored in mm and converted at generation time.
+Boss height is user-configurable per command run, but must remain greater than or equal to the selected preset minimum.
 
 ### Timeline Grouping
 

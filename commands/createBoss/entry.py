@@ -5,7 +5,7 @@ from ...lib import fusionAddInUtils as futil
 from ... import config
 from ...lib.bosses import PRESETS, get_preset
 from ...lib.bosses.generator import BossGenerationContext, generate_bosses
-from ...lib.bosses.validation import validate_preset, validate_selected_points
+from ...lib.bosses.validation import validate_boss_height_mm, validate_preset, validate_selected_points
 
 app = adsk.core.Application.get()
 ui = app.userInterface
@@ -16,6 +16,7 @@ CMD_NAME = 'Screw Boss'
 CMD_Description = 'Create screw bosses from selected sketch points'
 
 PRESET_INPUT_ID = 'preset_dropdown'
+BOSS_HEIGHT_INPUT_ID = 'boss_height'
 POINTS_INPUT_ID = 'boss_center_points'
 STATUS_INPUT_ID = 'status_box'
 
@@ -108,6 +109,34 @@ def _set_status(inputs: adsk.core.CommandInputs, message: str):
         status_input.text = message
 
 
+def _set_height_input_mm(inputs: adsk.core.CommandInputs, height_mm: float):
+    height_input = adsk.core.ValueCommandInput.cast(inputs.itemById(BOSS_HEIGHT_INPUT_ID))
+    if not height_input:
+        return
+
+    if hasattr(height_input, 'expression'):
+        height_input.expression = f'{height_mm} mm'
+        return
+
+    height_input.value = height_mm * 0.1
+
+
+def _selected_boss_height_mm(inputs: adsk.core.CommandInputs, fallback_mm: float) -> float:
+    height_input = adsk.core.ValueCommandInput.cast(inputs.itemById(BOSS_HEIGHT_INPUT_ID))
+    if not height_input:
+        return fallback_mm
+
+    value_internal = height_input.value
+
+    design = adsk.fusion.Design.cast(app.activeProduct)
+    if design and design.unitsManager:
+        internal_units = design.unitsManager.internalUnits
+        return design.unitsManager.convert(value_internal, internal_units, 'mm')
+
+    # Fallback assumes Fusion internal length units are cm.
+    return value_internal * 10.0
+
+
 def _refresh_status(inputs: adsk.core.CommandInputs):
     preset_id = _selected_preset_id(inputs)
     points = _selected_sketch_points(inputs)
@@ -117,10 +146,12 @@ def _refresh_status(inputs: adsk.core.CommandInputs):
         return
 
     preset = get_preset(preset_id)
+    selected_height_mm = _selected_boss_height_mm(inputs, preset.min_boss_height_mm)
     status = (
         f'Preset: {preset.display_name}<br>'
         f'Selected points: {len(points)}<br>'
-        f'OD {preset.outer_diameter_mm:.2f} mm, height {preset.boss_height_mm:.2f} mm'
+        f'OD {preset.outer_diameter_mm:.2f} mm, '
+        f'height {selected_height_mm:.2f} mm (min {preset.min_boss_height_mm:.2f} mm)'
     )
 
     valid_points, points_message = validate_selected_points(points)
@@ -130,6 +161,10 @@ def _refresh_status(inputs: adsk.core.CommandInputs):
     preset_error = validate_preset(preset)
     if preset_error:
         status += f'<br>{preset_error}'
+
+    height_error = validate_boss_height_mm(preset, selected_height_mm)
+    if height_error:
+        status += f'<br>{height_error}'
 
     _set_status(inputs, status)
 
@@ -217,6 +252,14 @@ def command_created(args: adsk.core.CommandCreatedEventArgs):
         preset_input.listItems.add(preset.display_name, is_first)
         is_first = False
 
+    first_preset = next(iter(PRESETS.values()))
+    inputs.addValueInput(
+        BOSS_HEIGHT_INPUT_ID,
+        'Boss Height',
+        'mm',
+        adsk.core.ValueInput.createByString(f'{first_preset.min_boss_height_mm} mm'),
+    )
+
     selection_input = inputs.addSelectionInput(
         POINTS_INPUT_ID,
         'Boss Centers',
@@ -263,6 +306,12 @@ def command_execute(args: adsk.core.CommandEventArgs):
         ui.messageBox(preset_error)
         return
 
+    boss_height_mm = _selected_boss_height_mm(inputs, preset.min_boss_height_mm)
+    boss_height_error = validate_boss_height_mm(preset, boss_height_mm)
+    if boss_height_error:
+        ui.messageBox(boss_height_error)
+        return
+
     first_sketch = points[0].parentSketch
     component = first_sketch.parentComponent
 
@@ -270,6 +319,7 @@ def command_execute(args: adsk.core.CommandEventArgs):
         component=component,
         sketch=first_sketch,
         preset=preset,
+        boss_height_mm=boss_height_mm,
     )
 
     global pending_group_start, pending_group_enabled
@@ -290,6 +340,13 @@ def command_execute(args: adsk.core.CommandEventArgs):
 def command_input_changed(args: adsk.core.InputChangedEventArgs):
     changed_input = args.input
     futil.log(f'{CMD_NAME} Input Changed Event fired from a change to {changed_input.id}')
+
+    if changed_input.id == PRESET_INPUT_ID:
+        preset_id = _selected_preset_id(args.inputs)
+        if preset_id:
+            preset = get_preset(preset_id)
+            _set_height_input_mm(args.inputs, preset.min_boss_height_mm)
+
     _refresh_status(args.inputs)
 
 
@@ -305,6 +362,11 @@ def command_validate_input(args: adsk.core.ValidateInputsEventArgs):
 
     preset = get_preset(preset_id)
     if validate_preset(preset):
+        args.areInputsValid = False
+        return
+
+    boss_height_mm = _selected_boss_height_mm(inputs, preset.min_boss_height_mm)
+    if validate_boss_height_mm(preset, boss_height_mm):
         args.areInputsValid = False
         return
 

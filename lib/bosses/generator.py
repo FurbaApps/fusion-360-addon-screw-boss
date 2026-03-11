@@ -15,6 +15,7 @@ class BossGenerationContext:
     component: adsk.fusion.Component
     sketch: adsk.fusion.Sketch
     preset: ScrewBossPreset
+    boss_height_mm: float
 
 
 def _mm_to_cm(value_mm: float) -> float:
@@ -320,7 +321,7 @@ def generate_bosses(context: BossGenerationContext, points: Iterable[adsk.fusion
     source_sketch = context.sketch
     preset = context.preset
 
-    height_cm = _mm_to_cm(preset.boss_height_mm)
+    height_cm = _mm_to_cm(context.boss_height_mm)
     outer_radius_cm = _mm_to_cm(preset.outer_radius_mm)
     main_diameter_cm = _mm_to_cm(preset.main_hole_diameter_mm)
     main_depth_cm = _mm_to_cm(preset.main_hole_depth_from_top_mm)

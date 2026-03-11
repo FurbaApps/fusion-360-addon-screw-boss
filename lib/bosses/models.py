@@ -6,7 +6,7 @@ class ScrewBossPreset:
     id: str
     display_name: str
     outer_diameter_mm: float
-    boss_height_mm: float
+    min_boss_height_mm: float
     base_fillet_mm: float
     main_hole_diameter_mm: float
     main_hole_depth_from_top_mm: float
