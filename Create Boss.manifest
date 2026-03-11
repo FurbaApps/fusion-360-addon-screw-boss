@@ -9,5 +9,5 @@
 	"runOnStartup":	false,
 	"supportedOS":	"windows|mac",
 	"editEnabled":	true,
-	"iconFilename":	"AddInIcon.svg"
+	"iconFilename":	"AddInIcon.png"
 }
