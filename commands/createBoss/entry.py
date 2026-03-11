@@ -281,7 +281,7 @@ def command_execute(args: adsk.core.CommandEventArgs):
         created_bodies = generate_bosses(context, points)
         # Grouping is deferred to destroy, when timeline objects are committed.
         pending_group_enabled = True
-        ui.messageBox(f'Created {len(created_bodies)} PCB boss(es).')
+        futil.log(f'{CMD_NAME}: Created {len(created_bodies)} PCB boss(es).')
     except Exception as ex:
         futil.handle_error('createBoss.command_execute')
         ui.messageBox(f'Create PCB Boss failed: {ex}')
