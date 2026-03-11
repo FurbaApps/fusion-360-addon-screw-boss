@@ -4,7 +4,7 @@ import os
 from ...lib import fusionAddInUtils as futil
 from ... import config
 from ...lib.bosses import PRESETS, get_preset
-from ...lib.bosses.generator import BossGenerationContext, generate_bosses
+from ...lib.bosses.generator import BossGenerationContext, BossGenerationResult, generate_bosses
 from ...lib.bosses.validation import validate_boss_height_mm, validate_preset, validate_selected_points
 
 app = adsk.core.Application.get()
@@ -35,6 +35,9 @@ ICON_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'resource
 local_handlers = []
 pending_group_start = -1
 pending_group_enabled = False
+pending_sketches = []
+pending_component = None
+pending_sketches_grouped = False
 
 
 # Executed when add-in is run.
@@ -236,6 +239,111 @@ def _group_new_timeline_entries(start_count: int, end_count: int):
     )
 
 
+def _group_new_sketches(component: adsk.fusion.Component, sketches):
+    if not component or not sketches:
+        return False, 'No component or sketches available for sketch grouping.'
+
+    valid_sketches = []
+    seen = set()
+    for sketch in sketches:
+        if not sketch:
+            continue
+        token = sketch.entityToken if hasattr(sketch, 'entityToken') else None
+        key = token if token else id(sketch)
+        if key in seen:
+            continue
+        seen.add(key)
+        valid_sketches.append(sketch)
+
+    if not valid_sketches:
+        return False, 'No valid sketches to group.'
+
+    folders = None
+    if hasattr(component, 'sketchFolders'):
+        folders = component.sketchFolders
+    elif hasattr(component.sketches, 'sketchFolders'):
+        folders = component.sketches.sketchFolders
+
+    sketches_api = getattr(component, 'sketches', None)
+
+    if folders is None and not (sketches_api and hasattr(sketches_api, 'addFolder')):
+        return False, 'Sketch folders API is unavailable in this Fusion build.'
+
+    sketches_collection = adsk.core.ObjectCollection.create()
+    for sketch in valid_sketches:
+        sketches_collection.add(sketch)
+
+    folder = None
+    attempts = []
+
+    def _try_create(owner, method_name, args):
+        nonlocal folder
+        if folder is not None or owner is None or not hasattr(owner, method_name):
+            return
+        try:
+            folder = getattr(owner, method_name)(*args)
+            attempts.append(f'{type(owner).__name__}.{method_name}{args} -> ok')
+        except Exception as ex:
+            attempts.append(f'{type(owner).__name__}.{method_name}{args} -> {ex}')
+
+    # Sketches API variants.
+    _try_create(sketches_api, 'addFolder', (sketches_collection, 'Screw Boss'))
+    _try_create(sketches_api, 'addFolder', ('Screw Boss', sketches_collection))
+    _try_create(sketches_api, 'addFolder', (sketches_collection,))
+    _try_create(sketches_api, 'addFolder', ('Screw Boss',))
+
+    # SketchFolders API variants.
+    _try_create(folders, 'add', (sketches_collection, 'Screw Boss'))
+    _try_create(folders, 'add', ('Screw Boss', sketches_collection))
+    _try_create(folders, 'add', (sketches_collection,))
+    _try_create(folders, 'add', ('Screw Boss',))
+
+    if folder is not None and hasattr(folder, 'name'):
+        folder.name = 'Screw Boss'
+
+    if folder is None:
+        return False, 'Could not create a sketch folder. Attempts: ' + ' | '.join(attempts)
+
+    # If sketches were not supplied during creation, try to add them now.
+    added_any = False
+    folder_sketches = getattr(folder, 'sketches', None)
+    if folder_sketches is not None and hasattr(folder_sketches, 'add'):
+        for sketch in valid_sketches:
+            try:
+                folder_sketches.add(sketch)
+                added_any = True
+            except Exception:
+                pass
+
+    if not added_any and hasattr(folder, 'add'):
+        for sketch in valid_sketches:
+            try:
+                folder.add(sketch)
+                added_any = True
+            except Exception:
+                pass
+
+    if not added_any and hasattr(folder, 'addSketch'):
+        for sketch in valid_sketches:
+            try:
+                folder.addSketch(sketch)
+                added_any = True
+            except Exception:
+                pass
+
+    # Confirm membership to avoid reporting false success.
+    member_count = 0
+    if hasattr(folder, 'sketches'):
+        folder_members = getattr(folder, 'sketches', None)
+        if folder_members is not None and hasattr(folder_members, 'count'):
+            member_count = folder_members.count
+
+    if member_count == 0 and not added_any:
+        return False, 'Sketch folder was created but sketches were not assigned.'
+
+    return True, ''
+
+
 def command_created(args: adsk.core.CommandCreatedEventArgs):
     futil.log(f'{CMD_NAME} Command Created Event')
 
@@ -322,13 +430,25 @@ def command_execute(args: adsk.core.CommandEventArgs):
         boss_height_mm=boss_height_mm,
     )
 
-    global pending_group_start, pending_group_enabled
+    global pending_group_start, pending_group_enabled, pending_sketches, pending_component, pending_sketches_grouped
 
     try:
         pending_group_start = _timeline_count()
         pending_group_enabled = False
+        pending_sketches = []
+        pending_component = component
+        pending_sketches_grouped = False
 
-        created_bodies = generate_bosses(context, points)
+        generation_result: BossGenerationResult = generate_bosses(context, points)
+        created_bodies = generation_result.bodies
+        pending_sketches = generation_result.sketches
+
+        sketches_grouped, sketches_reason = _group_new_sketches(pending_component, pending_sketches)
+        if sketches_grouped:
+            pending_sketches_grouped = True
+        else:
+            futil.log(f'{sketches_reason} Using named/hidden sketch fallback.')
+
         # Grouping is deferred to destroy, when timeline objects are committed.
         pending_group_enabled = True
         futil.log(f'{CMD_NAME}: Created {len(created_bodies)} screw boss(es).')
@@ -378,15 +498,23 @@ def command_validate_input(args: adsk.core.ValidateInputsEventArgs):
 def command_destroy(args: adsk.core.CommandEventArgs):
     futil.log(f'{CMD_NAME} Command Destroy Event')
 
-    global pending_group_start, pending_group_enabled
+    global pending_group_start, pending_group_enabled, pending_sketches, pending_component, pending_sketches_grouped
     if pending_group_enabled:
         timeline_end = _timeline_count()
         grouped, reason = _group_new_timeline_entries(pending_group_start, timeline_end)
         if not grouped:
             futil.log(reason)
 
+        if not pending_sketches_grouped:
+            sketches_grouped, sketches_reason = _group_new_sketches(pending_component, pending_sketches)
+            if not sketches_grouped:
+                futil.log(f'{sketches_reason} Using named/hidden sketch fallback.')
+
     pending_group_start = -1
     pending_group_enabled = False
+    pending_sketches = []
+    pending_component = None
+    pending_sketches_grouped = False
 
     global local_handlers
     local_handlers = []

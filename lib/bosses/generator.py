@@ -18,8 +18,28 @@ class BossGenerationContext:
     boss_height_mm: float
 
 
+@dataclass
+class BossGenerationResult:
+    bodies: List[adsk.fusion.BRepBody]
+    sketches: List[adsk.fusion.Sketch]
+
+
 def _mm_to_cm(value_mm: float) -> float:
     return value_mm * MM_TO_CM
+
+
+def _configure_helper_sketch(sketch: adsk.fusion.Sketch, name: str):
+    if not sketch:
+        return
+
+    if hasattr(sketch, 'name'):
+        sketch.name = name
+
+    # Helper sketches are construction artifacts and should not clutter the browser.
+    if hasattr(sketch, 'isLightBulbOn'):
+        sketch.isLightBulbOn = False
+    elif hasattr(sketch, 'isVisible'):
+        sketch.isVisible = False
 
 
 def _profile_for_circle(sketch: adsk.fusion.Sketch, circle: adsk.fusion.SketchCircle) -> adsk.fusion.Profile:
@@ -244,6 +264,7 @@ def _create_counterbore_hole(
     main_depth_cm: float,
     relief_diameter_cm: float,
     relief_depth_cm: float,
+    created_sketches: List[adsk.fusion.Sketch] = None,
 ):
     hole_features = component.features.holeFeatures
     hole_input = _create_counterbore_input(
@@ -254,6 +275,9 @@ def _create_counterbore_hole(
     )
 
     placement_sketch = component.sketches.add(top_face)
+    _configure_helper_sketch(placement_sketch, 'Screw Boss - Hole Positions')
+    if created_sketches is not None:
+        created_sketches.append(placement_sketch)
     center_on_face = placement_sketch.modelToSketchSpace(hole_center_world)
     sketch_point = placement_sketch.sketchPoints.add(center_on_face)
 
@@ -273,6 +297,7 @@ def _create_counterbore_holes_batch(
     main_depth_cm: float,
     relief_diameter_cm: float,
     relief_depth_cm: float,
+    created_sketches: List[adsk.fusion.Sketch] = None,
 ):
     hole_features = component.features.holeFeatures
     hole_input = _create_counterbore_input(
@@ -283,6 +308,9 @@ def _create_counterbore_holes_batch(
     )
 
     placement_sketch = component.sketches.add(top_face)
+    _configure_helper_sketch(placement_sketch, 'Screw Boss - Hole Positions')
+    if created_sketches is not None:
+        created_sketches.append(placement_sketch)
     sketch_points = []
     for center in hole_centers_world:
         center_on_face = placement_sketch.modelToSketchSpace(center)
@@ -307,6 +335,7 @@ def _create_counterbore_holes_batch(
                 main_depth_cm,
                 relief_diameter_cm,
                 relief_depth_cm,
+                created_sketches,
             )
         return
 
@@ -316,7 +345,7 @@ def _create_counterbore_holes_batch(
     hole_features.add(hole_input)
 
 
-def generate_bosses(context: BossGenerationContext, points: Iterable[adsk.fusion.SketchPoint]) -> List[adsk.fusion.BRepBody]:
+def generate_bosses(context: BossGenerationContext, points: Iterable[adsk.fusion.SketchPoint]) -> BossGenerationResult:
     component = context.component
     source_sketch = context.sketch
     preset = context.preset
@@ -331,12 +360,16 @@ def generate_bosses(context: BossGenerationContext, points: Iterable[adsk.fusion
 
     point_list = list(points)
     if not point_list:
-        return []
+        return BossGenerationResult(bodies=[], sketches=[])
+
+    created_sketches: List[adsk.fusion.Sketch] = []
 
     center_world_points = [source_sketch.sketchToModelSpace(point.geometry) for point in point_list]
 
     # 1) One sketch with all boss circles.
     boss_sketch = component.sketches.add(source_sketch.referencePlane)
+    _configure_helper_sketch(boss_sketch, 'Screw Boss - Profiles')
+    created_sketches.append(boss_sketch)
     circles = []
     for center_world in center_world_points:
         center_on_boss_sketch = boss_sketch.modelToSketchSpace(center_world)
@@ -387,9 +420,10 @@ def generate_bosses(context: BossGenerationContext, points: Iterable[adsk.fusion
         main_depth_cm,
         relief_diameter_cm,
         relief_depth_cm,
+        created_sketches,
     )
 
     # 4) One fillet feature with all base edges.
     _add_base_fillet_edges(component, base_edges, fillet_radius_cm)
 
-    return [host_body]
+    return BossGenerationResult(bodies=[host_body], sketches=created_sketches)
