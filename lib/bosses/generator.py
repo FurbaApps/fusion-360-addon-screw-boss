@@ -63,6 +63,42 @@ def _circle_center_on_face(face: adsk.fusion.BRepFace, target_radius_cm: float) 
     raise RuntimeError('Could not resolve circular top-face center for hole placement.')
 
 
+def _circle_edge_on_body_near_point(
+    body: adsk.fusion.BRepBody,
+    target_radius_cm: float,
+    near_point: adsk.core.Point3D,
+) -> adsk.fusion.BRepEdge:
+    best_edge = None
+    best_distance = None
+
+    for edge in body.edges:
+        circle = adsk.core.Circle3D.cast(edge.geometry)
+        if not circle:
+            continue
+        if abs(circle.radius - target_radius_cm) > 1e-6:
+            continue
+
+        distance = circle.center.distanceTo(near_point)
+        if best_distance is None or distance < best_distance:
+            best_distance = distance
+            best_edge = edge
+
+    if not best_edge:
+        raise RuntimeError('Could not resolve base circular edge for fillet.')
+
+    return best_edge
+
+
+def _add_base_fillet(component: adsk.fusion.Component, edge: adsk.fusion.BRepEdge, radius_cm: float):
+    fillets = component.features.filletFeatures
+    fillet_input = fillets.createInput()
+    edge_collection = adsk.core.ObjectCollection.create()
+    edge_collection.add(edge)
+    fillet_radius = adsk.core.ValueInput.createByReal(radius_cm)
+    fillet_input.addConstantRadiusEdgeSet(edge_collection, fillet_radius, True)
+    fillets.add(fillet_input)
+
+
 def _base_and_top_faces(
     start_face: adsk.fusion.BRepFace,
     end_face: adsk.fusion.BRepFace,
@@ -216,6 +252,7 @@ def generate_bosses(context: BossGenerationContext, points: Iterable[adsk.fusion
     main_depth_cm = _mm_to_cm(preset.main_hole_depth_from_top_mm)
     relief_diameter_cm = _mm_to_cm(preset.top_relief_diameter_mm)
     relief_depth_cm = _mm_to_cm(preset.top_relief_depth_mm)
+    fillet_radius_cm = _mm_to_cm(preset.base_fillet_mm)
 
     created_bodies: List[adsk.fusion.BRepBody] = []
 
@@ -251,6 +288,9 @@ def generate_bosses(context: BossGenerationContext, points: Iterable[adsk.fusion
             relief_diameter_cm,
             relief_depth_cm,
         )
+
+        fillet_edge = _circle_edge_on_body_near_point(body, outer_radius_cm, center_world)
+        _add_base_fillet(component, fillet_edge, fillet_radius_cm)
 
         # In join mode Fusion can return an empty bodies collection;
         # only append when a body reference is available.
