@@ -49,64 +49,160 @@ def _first_planar_face(faces: adsk.fusion.BRepFaces) -> adsk.fusion.BRepFace:
     for face in faces:
         if adsk.core.Plane.cast(face.geometry):
             return face
-    raise RuntimeError('Could not find a planar face in feature face collection.')
+    raise RuntimeError('Could not find planar face in feature faces.')
 
 
-def _circle_edge_on_face(face: adsk.fusion.BRepFace, target_radius_cm: float) -> adsk.fusion.BRepEdge:
+def _circle_center_on_face(face: adsk.fusion.BRepFace, target_radius_cm: float) -> adsk.core.Point3D:
     for loop in face.loops:
         for coedge in loop.coEdges:
-            edge = coedge.edge
-            circle = adsk.core.Circle3D.cast(edge.geometry)
+            circle = adsk.core.Circle3D.cast(coedge.edge.geometry)
             if not circle:
                 continue
             if abs(circle.radius - target_radius_cm) <= 1e-6:
-                return edge
-    raise RuntimeError('Could not find circular edge on face for fillet.')
+                return circle.center
+    raise RuntimeError('Could not resolve circular top-face center for hole placement.')
 
 
-def _add_fillet(component: adsk.fusion.Component, edge: adsk.fusion.BRepEdge, radius_cm: float) -> None:
-    fillets = component.features.filletFeatures
-    fillet_input = fillets.createInput()
-    edge_collection = adsk.core.ObjectCollection.create()
-    edge_collection.add(edge)
-    radius_input = adsk.core.ValueInput.createByReal(radius_cm)
-    fillet_input.addConstantRadiusEdgeSet(edge_collection, radius_input, True)
-    fillets.add(fillet_input)
+def _base_and_top_faces(
+    start_face: adsk.fusion.BRepFace,
+    end_face: adsk.fusion.BRepFace,
+    base_point: adsk.core.Point3D,
+):
+    start_plane = adsk.core.Plane.cast(start_face.geometry)
+    end_plane = adsk.core.Plane.cast(end_face.geometry)
+    if not start_plane or not end_plane:
+        raise RuntimeError('Expected planar start/end faces on boss extrusion.')
+
+    if start_plane.distanceToPoint(base_point) <= end_plane.distanceToPoint(base_point):
+        return start_face, end_face
+    return end_face, start_face
 
 
-def _cut_circle_on_face(
-    component: adsk.fusion.Component,
-    target_body: adsk.fusion.BRepBody,
-    face: adsk.fusion.BRepFace,
-    center_world: adsk.core.Point3D,
-    diameter_cm: float,
-    depth_cm: float,
-) -> None:
-    sketch = component.sketches.add(face)
-    center_sketch = sketch.modelToSketchSpace(center_world)
-    circle = sketch.sketchCurves.sketchCircles.addByCenterRadius(center_sketch, diameter_cm / 2.0)
-    profile = _profile_for_circle(sketch, circle)
-    before_volume = target_body.volume
+def _resolve_target_body(component: adsk.fusion.Component) -> adsk.fusion.BRepBody:
+    for body in component.bRepBodies:
+        if body.isSolid:
+            return body
+    raise RuntimeError('No solid target body found in active component.')
 
-    cut_feature = _create_extrude(
-        component,
-        profile,
-        depth_cm,
-        adsk.fusion.FeatureOperations.CutFeatureOperation,
-        adsk.fusion.ExtentDirections.NegativeExtentDirection,
-    )
-    if abs(target_body.volume - before_volume) > 1e-9:
+
+def _resolve_top_face_on_body(
+    body: adsk.fusion.BRepBody,
+    base_point: adsk.core.Point3D,
+    target_radius_cm: float,
+) -> adsk.fusion.BRepFace:
+    refs = []
+
+    for face in body.faces:
+        if not adsk.core.Plane.cast(face.geometry):
+            continue
+
+        center = None
+        for loop in face.loops:
+            for coedge in loop.coEdges:
+                circle = adsk.core.Circle3D.cast(coedge.edge.geometry)
+                if not circle:
+                    continue
+                if abs(circle.radius - target_radius_cm) <= 1e-6:
+                    center = circle.center
+                    break
+            if center:
+                break
+
+        if center:
+            refs.append((face, center.distanceTo(base_point)))
+
+    if not refs:
+        raise RuntimeError('Could not resolve boss circular top face on joined body.')
+
+    refs.sort(key=lambda item: item[1])
+    return refs[-1][0]
+
+
+def _create_counterbore_input(
+    hole_features: adsk.fusion.HoleFeatures,
+    main_diameter_cm: float,
+    relief_diameter_cm: float,
+    relief_depth_cm: float,
+):
+    main_diam = adsk.core.ValueInput.createByReal(main_diameter_cm)
+    relief_diam = adsk.core.ValueInput.createByReal(relief_diameter_cm)
+    relief_depth = adsk.core.ValueInput.createByReal(relief_depth_cm)
+
+    try:
+        return hole_features.createCounterboreInput(main_diam, relief_diam, relief_depth)
+    except TypeError:
+        # Some API builds include tip angle in this constructor.
+        tip = adsk.core.ValueInput.createByString('180 deg')
+        return hole_features.createCounterboreInput(main_diam, relief_diam, relief_depth, tip)
+
+
+def _set_hole_depth(hole_input, depth_cm: float):
+    depth_input = adsk.core.ValueInput.createByReal(depth_cm)
+    if hasattr(hole_input, 'setDistanceExtent'):
+        try:
+            hole_input.setDistanceExtent(depth_input)
+            return
+        except TypeError:
+            hole_input.setDistanceExtent(depth_input, False)
+
+
+def _set_hole_position(hole_input, sketch_point: adsk.fusion.SketchPoint):
+    if hasattr(hole_input, 'setPositionBySketchPoint'):
+        try:
+            hole_input.setPositionBySketchPoint(sketch_point)
+            return
+        except TypeError:
+            # Older variants accept (point, orientationEntity).
+            pass
+
+    if hasattr(hole_input, 'setPositionByPoint'):
+        hole_input.setPositionByPoint(sketch_point.worldGeometry)
         return
 
-    cut_feature.deleteMe()
+    raise RuntimeError('Hole input does not support setPositionBySketchPoint in this API version.')
 
-    _create_extrude(
-        component,
-        profile,
-        depth_cm,
-        adsk.fusion.FeatureOperations.CutFeatureOperation,
-        adsk.fusion.ExtentDirections.PositiveExtentDirection,
+
+def _set_flat_drill_point(hole_input):
+    # In Fusion, a flat drill point corresponds to 180 degree tip angle.
+    if hasattr(hole_input, 'tipAngle'):
+        hole_input.tipAngle = adsk.core.ValueInput.createByString('180 deg')
+
+
+def _set_simple_tap_type(hole_input):
+    # Only apply if this API build exposes tap-type controls.
+    hole_tap_types = getattr(adsk.fusion, 'HoleTapTypes', None)
+    simple_tap = getattr(hole_tap_types, 'SimpleHoleTapType', None) if hole_tap_types else None
+    if simple_tap is not None and hasattr(hole_input, 'tapType'):
+        hole_input.tapType = simple_tap
+
+
+def _create_counterbore_hole(
+    component: adsk.fusion.Component,
+    top_face: adsk.fusion.BRepFace,
+    hole_center_world: adsk.core.Point3D,
+    main_diameter_cm: float,
+    main_depth_cm: float,
+    relief_diameter_cm: float,
+    relief_depth_cm: float,
+):
+    hole_features = component.features.holeFeatures
+    hole_input = _create_counterbore_input(
+        hole_features,
+        main_diameter_cm,
+        relief_diameter_cm,
+        relief_depth_cm,
     )
+
+    placement_sketch = component.sketches.add(top_face)
+    center_on_face = placement_sketch.modelToSketchSpace(hole_center_world)
+    sketch_point = placement_sketch.sketchPoints.add(center_on_face)
+
+    _set_hole_position(hole_input, sketch_point)
+    _set_hole_depth(hole_input, main_depth_cm)
+    _set_flat_drill_point(hole_input)
+    _set_simple_tap_type(hole_input)
+
+    hole_features.add(hole_input)
 
 
 def generate_bosses(context: BossGenerationContext, points: Iterable[adsk.fusion.SketchPoint]) -> List[adsk.fusion.BRepBody]:
@@ -116,11 +212,10 @@ def generate_bosses(context: BossGenerationContext, points: Iterable[adsk.fusion
 
     height_cm = _mm_to_cm(preset.boss_height_mm)
     outer_radius_cm = _mm_to_cm(preset.outer_radius_mm)
-    relief_diameter_cm = _mm_to_cm(preset.top_relief_diameter_mm)
-    relief_depth_cm = _mm_to_cm(preset.top_relief_depth_mm)
     main_diameter_cm = _mm_to_cm(preset.main_hole_diameter_mm)
     main_depth_cm = _mm_to_cm(preset.main_hole_depth_from_top_mm)
-    fillet_radius_cm = _mm_to_cm(preset.base_fillet_mm)
+    relief_diameter_cm = _mm_to_cm(preset.top_relief_diameter_mm)
+    relief_depth_cm = _mm_to_cm(preset.top_relief_depth_mm)
 
     created_bodies: List[adsk.fusion.BRepBody] = []
 
@@ -142,16 +237,26 @@ def generate_bosses(context: BossGenerationContext, points: Iterable[adsk.fusion
             height_cm,
             adsk.fusion.FeatureOperations.JoinFeatureOperation,
         )
-        body = extrude.bodies.item(0)
-        top_face = _first_planar_face(extrude.endFaces)
-        base_face = _first_planar_face(extrude.startFaces)
 
-        _cut_circle_on_face(component, body, top_face, center_world, relief_diameter_cm, relief_depth_cm)
-        _cut_circle_on_face(component, body, top_face, center_world, main_diameter_cm, main_depth_cm)
+        body = _resolve_target_body(component)
+        top_face = _resolve_top_face_on_body(body, center_world, outer_radius_cm)
+        top_center_world = _circle_center_on_face(top_face, outer_radius_cm)
 
-        base_edge = _circle_edge_on_face(base_face, outer_radius_cm)
-        _add_fillet(component, base_edge, fillet_radius_cm)
+        _create_counterbore_hole(
+            component,
+            top_face,
+            top_center_world,
+            main_diameter_cm,
+            main_depth_cm,
+            relief_diameter_cm,
+            relief_depth_cm,
+        )
 
-        created_bodies.append(body)
+        # In join mode Fusion can return an empty bodies collection;
+        # only append when a body reference is available.
+        if extrude.bodies and extrude.bodies.count > 0:
+            created_bodies.append(extrude.bodies.item(0))
+        else:
+            created_bodies.append(body)
 
     return created_bodies

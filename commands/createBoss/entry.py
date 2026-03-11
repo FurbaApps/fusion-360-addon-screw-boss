@@ -206,8 +206,9 @@ def command_execute(args: adsk.core.CommandEventArgs):
     try:
         created_bodies = generate_bosses(context, points)
         ui.messageBox(f'Created {len(created_bodies)} PCB boss(es).')
-    except Exception:
+    except Exception as ex:
         futil.handle_error('createBoss.command_execute')
+        ui.messageBox(f'Create PCB Boss failed: {ex}')
 
 
 def command_input_changed(args: adsk.core.InputChangedEventArgs):
