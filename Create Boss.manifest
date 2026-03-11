@@ -3,7 +3,7 @@
 	"type":	"addin",
 	"author":	"Igor Augustyński",
 	"description":	{
-		"":	"Creates a plastic screw boss on a solid surface"
+		"":	"Screw Boss add-in for creating screw bosses on solid surfaces"
 	},
 	"version":	"",
 	"runOnStartup":	false,

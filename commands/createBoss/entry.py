@@ -11,9 +11,9 @@ app = adsk.core.Application.get()
 ui = app.userInterface
 
 
-CMD_ID = f'{config.COMPANY_NAME}_{config.ADDIN_NAME}_createPcbBoss'
-CMD_NAME = 'Create PCB Boss'
-CMD_Description = 'Create PCB screw bosses from selected sketch points'
+CMD_ID = f'{config.COMPANY_NAME}_{config.ADDIN_NAME}_screwBoss'
+CMD_NAME = 'Screw Boss'
+CMD_Description = 'Create screw bosses from selected sketch points'
 
 PRESET_INPUT_ID = 'preset_dropdown'
 POINTS_INPUT_ID = 'boss_center_points'
@@ -192,11 +192,11 @@ def _group_new_timeline_entries(start_count: int, end_count: int):
             group = None
 
     if group is not None and hasattr(group, 'name'):
-        group.name = 'Create PCB Boss'
+        group.name = 'Screw Boss'
         return True, ''
 
     return False, (
-        f'Could not group timeline entries for Create PCB Boss command. '
+        f'Could not group timeline entries for Screw Boss command. '
         f'start={start_index}, end={end_index}, timelineCount={_timeline_count()}'
     )
 
@@ -281,10 +281,10 @@ def command_execute(args: adsk.core.CommandEventArgs):
         created_bodies = generate_bosses(context, points)
         # Grouping is deferred to destroy, when timeline objects are committed.
         pending_group_enabled = True
-        futil.log(f'{CMD_NAME}: Created {len(created_bodies)} PCB boss(es).')
+        futil.log(f'{CMD_NAME}: Created {len(created_bodies)} screw boss(es).')
     except Exception as ex:
         futil.handle_error('createBoss.command_execute')
-        ui.messageBox(f'Create PCB Boss failed: {ex}')
+        ui.messageBox(f'Screw Boss failed: {ex}')
 
 
 def command_input_changed(args: adsk.core.InputChangedEventArgs):

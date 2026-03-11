@@ -1,12 +1,12 @@
-# Create PCB Boss (Fusion 360 Add-in)
+# Screw Boss (Fusion 360 Add-in)
 
 ## What This Add-in Does
 
-This Fusion 360 Python add-in creates PCB screw bosses from selected sketch points.
+This Fusion 360 Python add-in creates screw bosses from selected sketch points.
 
 Current workflow:
 
-1. Launch `Create PCB Boss` from the Fusion UI.
+1. Launch `Screw Boss` from the Fusion UI.
 2. Choose a screw preset (currently `Bossard 8110867`).
 3. Select one or more sketch points from a single sketch.
 4. Confirm the command.
@@ -66,7 +66,7 @@ Preset values are stored in mm and converted at generation time.
 
 ### Timeline Grouping
 
-If supported in the active design mode and API variant, timeline entries created by one command run are grouped and named `Create PCB Boss`.
+If supported in the active design mode and API variant, timeline entries created by one command run are grouped and named `Screw Boss`.
 
 ## Guidelines for Future Changes
 
