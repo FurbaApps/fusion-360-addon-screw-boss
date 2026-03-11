@@ -32,24 +32,29 @@ def _profile_for_circle(sketch: adsk.fusion.Sketch, circle: adsk.fusion.SketchCi
 
 def _create_extrude(
     component: adsk.fusion.Component,
-    profile: adsk.fusion.Profile,
+    profile,
     distance_cm: float,
     operation: adsk.fusion.FeatureOperations,
     direction: adsk.fusion.ExtentDirections = adsk.fusion.ExtentDirections.PositiveExtentDirection,
+    participant_body: adsk.fusion.BRepBody = None,
 ) -> adsk.fusion.ExtrudeFeature:
     extrudes = component.features.extrudeFeatures
     ext_input = extrudes.createInput(profile, operation)
+
+    if participant_body and hasattr(ext_input, 'participantBodies'):
+        try:
+            # Newer bindings expect a vector-like Python sequence.
+            ext_input.participantBodies = [participant_body]
+        except TypeError:
+            # Fallback for builds that still accept ObjectCollection.
+            participants = adsk.core.ObjectCollection.create()
+            participants.add(participant_body)
+            ext_input.participantBodies = participants
+
     distance_input = adsk.core.ValueInput.createByReal(distance_cm)
     extent = adsk.fusion.DistanceExtentDefinition.create(distance_input)
     ext_input.setOneSideExtent(extent, direction)
     return extrudes.add(ext_input)
-
-
-def _first_planar_face(faces: adsk.fusion.BRepFaces) -> adsk.fusion.BRepFace:
-    for face in faces:
-        if adsk.core.Plane.cast(face.geometry):
-            return face
-    raise RuntimeError('Could not find planar face in feature faces.')
 
 
 def _circle_center_on_face(face: adsk.fusion.BRepFace, target_radius_cm: float) -> adsk.core.Point3D:
@@ -99,19 +104,15 @@ def _add_base_fillet(component: adsk.fusion.Component, edge: adsk.fusion.BRepEdg
     fillets.add(fillet_input)
 
 
-def _base_and_top_faces(
-    start_face: adsk.fusion.BRepFace,
-    end_face: adsk.fusion.BRepFace,
-    base_point: adsk.core.Point3D,
-):
-    start_plane = adsk.core.Plane.cast(start_face.geometry)
-    end_plane = adsk.core.Plane.cast(end_face.geometry)
-    if not start_plane or not end_plane:
-        raise RuntimeError('Expected planar start/end faces on boss extrusion.')
+def _add_base_fillet_edges(component: adsk.fusion.Component, edges: adsk.core.ObjectCollection, radius_cm: float):
+    if edges.count == 0:
+        return
 
-    if start_plane.distanceToPoint(base_point) <= end_plane.distanceToPoint(base_point):
-        return start_face, end_face
-    return end_face, start_face
+    fillets = component.features.filletFeatures
+    fillet_input = fillets.createInput()
+    fillet_radius = adsk.core.ValueInput.createByReal(radius_cm)
+    fillet_input.addConstantRadiusEdgeSet(edges, fillet_radius, True)
+    fillets.add(fillet_input)
 
 
 def _distance_point_to_bbox(point: adsk.core.Point3D, bbox: adsk.core.BoundingBox3D) -> float:
@@ -170,14 +171,10 @@ def _resolve_top_face_on_body(
     if not refs:
         raise RuntimeError('Could not resolve boss circular top face on joined body.')
 
-    # Keep only circular faces local to the selected boss point.
-    local_threshold = boss_height_cm + 0.05
-    local_refs = [item for item in refs if item[1] <= local_threshold]
-    if local_refs:
-        refs = local_refs
-
-    refs.sort(key=lambda item: item[1])
-    return refs[-1][0]
+    # Choose the face whose center distance best matches expected boss height.
+    # This avoids selecting a neighboring boss face when many bosses exist.
+    refs.sort(key=lambda item: abs(item[1] - boss_height_cm))
+    return refs[0][0]
 
 
 def _create_counterbore_input(
@@ -267,6 +264,57 @@ def _create_counterbore_hole(
     hole_features.add(hole_input)
 
 
+def _create_counterbore_holes_batch(
+    component: adsk.fusion.Component,
+    top_face: adsk.fusion.BRepFace,
+    hole_centers_world: List[adsk.core.Point3D],
+    main_diameter_cm: float,
+    main_depth_cm: float,
+    relief_diameter_cm: float,
+    relief_depth_cm: float,
+):
+    hole_features = component.features.holeFeatures
+    hole_input = _create_counterbore_input(
+        hole_features,
+        main_diameter_cm,
+        relief_diameter_cm,
+        relief_depth_cm,
+    )
+
+    placement_sketch = component.sketches.add(top_face)
+    sketch_points = []
+    for center in hole_centers_world:
+        center_on_face = placement_sketch.modelToSketchSpace(center)
+        sketch_points.append(placement_sketch.sketchPoints.add(center_on_face))
+
+    if hasattr(hole_input, 'setPositionBySketchPoints'):
+        try:
+            hole_input.setPositionBySketchPoints(sketch_points)
+        except TypeError:
+            points_collection = adsk.core.ObjectCollection.create()
+            for point in sketch_points:
+                points_collection.add(point)
+            hole_input.setPositionBySketchPoints(points_collection)
+    else:
+        # API fallback: use one hole feature per point if batch positioning is unavailable.
+        for center in hole_centers_world:
+            _create_counterbore_hole(
+                component,
+                top_face,
+                center,
+                main_diameter_cm,
+                main_depth_cm,
+                relief_diameter_cm,
+                relief_depth_cm,
+            )
+        return
+
+    _set_hole_depth(hole_input, main_depth_cm)
+    _set_flat_drill_point(hole_input)
+    _set_simple_tap_type(hole_input)
+    hole_features.add(hole_input)
+
+
 def generate_bosses(context: BossGenerationContext, points: Iterable[adsk.fusion.SketchPoint]) -> List[adsk.fusion.BRepBody]:
     component = context.component
     source_sketch = context.sketch
@@ -280,49 +328,67 @@ def generate_bosses(context: BossGenerationContext, points: Iterable[adsk.fusion
     relief_depth_cm = _mm_to_cm(preset.top_relief_depth_mm)
     fillet_radius_cm = _mm_to_cm(preset.base_fillet_mm)
 
-    created_bodies: List[adsk.fusion.BRepBody] = []
+    point_list = list(points)
+    if not point_list:
+        return []
 
-    for point in points:
-        center_sketch = point.geometry
-        center_world = source_sketch.sketchToModelSpace(center_sketch)
+    center_world_points = [source_sketch.sketchToModelSpace(point.geometry) for point in point_list]
 
-        # Build the boss profile in a dedicated sketch so existing wall/outline geometry
-        # cannot cause Fusion to pick a large surrounding profile.
-        boss_sketch = component.sketches.add(source_sketch.referencePlane)
+    # 1) One sketch with all boss circles.
+    boss_sketch = component.sketches.add(source_sketch.referencePlane)
+    circles = []
+    for center_world in center_world_points:
         center_on_boss_sketch = boss_sketch.modelToSketchSpace(center_world)
-
         circle = boss_sketch.sketchCurves.sketchCircles.addByCenterRadius(center_on_boss_sketch, outer_radius_cm)
+        circles.append(circle)
+
+    # Resolve fresh profile references after the sketch is fully populated.
+    profiles = adsk.core.ObjectCollection.create()
+    for circle in circles:
         profile = _profile_for_circle(boss_sketch, circle)
+        profiles.add(profile)
 
-        extrude = _create_extrude(
-            component,
-            profile,
-            height_cm,
-            adsk.fusion.FeatureOperations.JoinFeatureOperation,
-        )
+    host_body = _resolve_target_body_near_point(component, center_world_points[0])
 
+    # 2) One join extrude for all boss profiles.
+    _create_extrude(
+        component,
+        profiles,
+        height_cm,
+        adsk.fusion.FeatureOperations.JoinFeatureOperation,
+        participant_body=host_body,
+    )
+
+    # Resolve all top centers and base edges per selected point.
+    top_centers = []
+    base_edges = adsk.core.ObjectCollection.create()
+    edge_tokens = set()
+
+    for center_world in center_world_points:
         body = _resolve_target_body_near_point(component, center_world)
         top_face = _resolve_top_face_on_body(body, center_world, outer_radius_cm, height_cm)
-        top_center_world = _circle_center_on_face(top_face, outer_radius_cm)
+        top_centers.append(_circle_center_on_face(top_face, outer_radius_cm))
 
-        _create_counterbore_hole(
-            component,
-            top_face,
-            top_center_world,
-            main_diameter_cm,
-            main_depth_cm,
-            relief_diameter_cm,
-            relief_depth_cm,
-        )
+        edge = _circle_edge_on_body_near_point(body, outer_radius_cm, center_world)
+        token = edge.entityToken if hasattr(edge, 'entityToken') else None
+        if token is None or token not in edge_tokens:
+            base_edges.add(edge)
+            if token is not None:
+                edge_tokens.add(token)
 
-        fillet_edge = _circle_edge_on_body_near_point(body, outer_radius_cm, center_world)
-        _add_base_fillet(component, fillet_edge, fillet_radius_cm)
+    # 3) One hole feature for all centers (when API supports setPositionBySketchPoints).
+    hole_top_face = _resolve_top_face_on_body(host_body, center_world_points[0], outer_radius_cm, height_cm)
+    _create_counterbore_holes_batch(
+        component,
+        hole_top_face,
+        top_centers,
+        main_diameter_cm,
+        main_depth_cm,
+        relief_diameter_cm,
+        relief_depth_cm,
+    )
 
-        # In join mode Fusion can return an empty bodies collection;
-        # only append when a body reference is available.
-        if extrude.bodies and extrude.bodies.count > 0:
-            created_bodies.append(extrude.bodies.item(0))
-        else:
-            created_bodies.append(body)
+    # 4) One fillet feature with all base edges.
+    _add_base_fillet_edges(component, base_edges, fillet_radius_cm)
 
-    return created_bodies
+    return [host_body]
