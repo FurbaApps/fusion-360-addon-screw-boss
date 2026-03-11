@@ -32,6 +32,8 @@ ICON_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'resource
 # Local list of event handlers used to maintain a reference so
 # they are not released and garbage collected.
 local_handlers = []
+pending_group_start = -1
+pending_group_enabled = False
 
 
 # Executed when add-in is run.
@@ -132,6 +134,73 @@ def _refresh_status(inputs: adsk.core.CommandInputs):
     _set_status(inputs, status)
 
 
+def _timeline_count() -> int:
+    design = adsk.fusion.Design.cast(app.activeProduct)
+    if not design:
+        return -1
+
+    timeline = design.timeline
+    if not timeline:
+        return -1
+
+    if hasattr(timeline, 'count'):
+        return timeline.count
+    return -1
+
+
+def _group_new_timeline_entries(start_count: int, end_count: int):
+    if start_count < 0 or end_count < 0 or end_count <= start_count:
+        return False, f'Invalid timeline range: start={start_count}, end={end_count}'
+
+    design = adsk.fusion.Design.cast(app.activeProduct)
+    if not design or not design.timeline:
+        return False, 'Active product is not a timeline-enabled design.'
+
+    timeline = design.timeline
+    timeline_groups = getattr(timeline, 'timelineGroups', None)
+    if timeline_groups is None:
+        design_type = getattr(design, 'designType', None)
+        return False, f'Timeline groups are unavailable in this design mode (designType={design_type}).'
+
+    start_index = start_count
+    end_index = end_count - 1
+
+    group = None
+
+    # Variant 1: add(startIndex, endIndex)
+    try:
+        group = timeline_groups.add(start_index, end_index)
+    except Exception:
+        group = None
+
+    # Variant 2: add(startTimelineObject, endTimelineObject)
+    if group is None and hasattr(timeline, 'item'):
+        try:
+            start_obj = timeline.item(start_index)
+            end_obj = timeline.item(end_index)
+            group = timeline_groups.add(start_obj, end_obj)
+        except Exception:
+            group = None
+
+    # Variant 3: add(startTimelineObject.index, endTimelineObject.index)
+    if group is None and hasattr(timeline, 'item'):
+        try:
+            start_obj = timeline.item(start_index)
+            end_obj = timeline.item(end_index)
+            group = timeline_groups.add(start_obj.index, end_obj.index)
+        except Exception:
+            group = None
+
+    if group is not None and hasattr(group, 'name'):
+        group.name = 'Create PCB Boss'
+        return True, ''
+
+    return False, (
+        f'Could not group timeline entries for Create PCB Boss command. '
+        f'start={start_index}, end={end_index}, timelineCount={_timeline_count()}'
+    )
+
+
 def command_created(args: adsk.core.CommandCreatedEventArgs):
     futil.log(f'{CMD_NAME} Command Created Event')
 
@@ -203,8 +272,15 @@ def command_execute(args: adsk.core.CommandEventArgs):
         preset=preset,
     )
 
+    global pending_group_start, pending_group_enabled
+
     try:
+        pending_group_start = _timeline_count()
+        pending_group_enabled = False
+
         created_bodies = generate_bosses(context, points)
+        # Grouping is deferred to destroy, when timeline objects are committed.
+        pending_group_enabled = True
         ui.messageBox(f'Created {len(created_bodies)} PCB boss(es).')
     except Exception as ex:
         futil.handle_error('createBoss.command_execute')
@@ -239,6 +315,16 @@ def command_validate_input(args: adsk.core.ValidateInputsEventArgs):
 
 def command_destroy(args: adsk.core.CommandEventArgs):
     futil.log(f'{CMD_NAME} Command Destroy Event')
+
+    global pending_group_start, pending_group_enabled
+    if pending_group_enabled:
+        timeline_end = _timeline_count()
+        grouped, reason = _group_new_timeline_entries(pending_group_start, timeline_end)
+        if not grouped:
+            futil.log(reason)
+
+    pending_group_start = -1
+    pending_group_enabled = False
 
     global local_handlers
     local_handlers = []
