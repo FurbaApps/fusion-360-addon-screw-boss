@@ -1,23 +1,33 @@
 # Screw Boss (Fusion 360 Add-in)
 
-## What This Add-in Does
+## Overview
 
-This Fusion 360 Python add-in creates screw bosses from selected sketch points.
+`Screw Boss` is a Fusion 360 Python add-in that creates screw bosses from selected sketch points.
+For each selected point, it creates a boss with a counterbore relief, a main hole depth, and a base fillet.
 
-Current workflow:
+## Features
+
+- Creates one or more screw bosses from selected sketch points in a single command run.
+- Uses screw presets for geometry values (outer diameter, hole sizes/depths, relief, fillet, minimum boss height).
+- Lets you set `Boss Height` in mm, with validation that enforces the preset minimum.
+- Shows a read-only screw description for the selected preset in the command dialog.
+- Creates bosses using join behavior so generated geometry merges into the target solid body.
+- Batches geometry operations per run to reduce timeline clutter.
+- Uses direct point-based hole placement in the common path to avoid extra helper sketches when API support is available.
+
+## Currently Supported Screw Types
+
+- `Bossard B2X6/BN13265`
+  - Description: `Pan head screw, Torx plus®, 2mm x 6mm`
+
+## Workflow
 
 1. Launch `Screw Boss` from the Fusion UI.
-2. Choose a screw preset (currently `Bossard 8110867`).
-3. Set `Boss Height` in mm (defaults to the preset minimum and can be increased).
-4. Select one or more sketch points from a single sketch.
-5. Confirm the command.
-6. The add-in creates bosses with:
-   - joined cylindrical boss body
-   - counterbore hole (used for relief)
-   - main hole depth
-   - base fillet
-
-The command is optimized to reduce timeline clutter by batching feature creation per command run.
+2. Choose a screw model preset.
+3. Review the screw description shown under the preset selector.
+4. Set `Boss Height` in mm (default is the preset minimum).
+5. Select one or more sketch points from a single sketch.
+6. Confirm the command.
 
 ## Project Structure
 
