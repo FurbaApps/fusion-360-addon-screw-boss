@@ -17,8 +17,8 @@ CMD_Description = 'Create screw bosses from selected sketch points'
 
 PRESET_INPUT_ID = 'preset_dropdown'
 BOSS_HEIGHT_INPUT_ID = 'boss_height'
+DESCRIPTION_INPUT_ID = 'screw_description'
 POINTS_INPUT_ID = 'boss_center_points'
-STATUS_INPUT_ID = 'status_box'
 
 # Specify that the command will be promoted to the panel.
 IS_PROMOTED = True
@@ -106,10 +106,10 @@ def _selected_sketch_points(inputs: adsk.core.CommandInputs):
     return points
 
 
-def _set_status(inputs: adsk.core.CommandInputs, message: str):
-    status_input = adsk.core.TextBoxCommandInput.cast(inputs.itemById(STATUS_INPUT_ID))
-    if status_input:
-        status_input.text = message
+def _set_description(inputs: adsk.core.CommandInputs, message: str):
+    description_input = adsk.core.TextBoxCommandInput.cast(inputs.itemById(DESCRIPTION_INPUT_ID))
+    if description_input:
+        description_input.text = message
 
 
 def _set_height_input_mm(inputs: adsk.core.CommandInputs, height_mm: float):
@@ -140,36 +140,14 @@ def _selected_boss_height_mm(inputs: adsk.core.CommandInputs, fallback_mm: float
     return value_internal * 10.0
 
 
-def _refresh_status(inputs: adsk.core.CommandInputs):
+def _refresh_description(inputs: adsk.core.CommandInputs):
     preset_id = _selected_preset_id(inputs)
-    points = _selected_sketch_points(inputs)
-
     if not preset_id:
-        _set_status(inputs, 'Choose a screw preset.')
+        _set_description(inputs, '')
         return
 
     preset = get_preset(preset_id)
-    selected_height_mm = _selected_boss_height_mm(inputs, preset.min_boss_height_mm)
-    status = (
-        f'Preset: {preset.display_name}<br>'
-        f'Selected points: {len(points)}<br>'
-        f'OD {preset.outer_diameter_mm:.2f} mm, '
-        f'height {selected_height_mm:.2f} mm (min {preset.min_boss_height_mm:.2f} mm)'
-    )
-
-    valid_points, points_message = validate_selected_points(points)
-    if not valid_points:
-        status += f'<br>{points_message}'
-
-    preset_error = validate_preset(preset)
-    if preset_error:
-        status += f'<br>{preset_error}'
-
-    height_error = validate_boss_height_mm(preset, selected_height_mm)
-    if height_error:
-        status += f'<br>{height_error}'
-
-    _set_status(inputs, status)
+    _set_description(inputs, preset.screw_description)
 
 
 def _timeline_count() -> int:
@@ -347,6 +325,10 @@ def _group_new_sketches(component: adsk.fusion.Component, sketches):
 def command_created(args: adsk.core.CommandCreatedEventArgs):
     futil.log(f'{CMD_NAME} Command Created Event')
 
+    # Make room for longer screw descriptions without forcing dialog scrolling.
+    if hasattr(args.command, 'setDialogInitialSize'):
+        args.command.setDialogInitialSize(520, 520)
+
     inputs = args.command.commandInputs
 
     preset_input = inputs.addDropDownCommandInput(
@@ -361,6 +343,14 @@ def command_created(args: adsk.core.CommandCreatedEventArgs):
         is_first = False
 
     first_preset = next(iter(PRESETS.values()))
+    description_input = inputs.addTextBoxCommandInput(
+        DESCRIPTION_INPUT_ID,
+        'Screw Description',
+        first_preset.screw_description,
+        1,
+        True,
+    )
+
     inputs.addValueInput(
         BOSS_HEIGHT_INPUT_ID,
         'Boss Height',
@@ -376,15 +366,7 @@ def command_created(args: adsk.core.CommandCreatedEventArgs):
     selection_input.addSelectionFilter('SketchPoints')
     selection_input.setSelectionLimits(1, 0)
 
-    inputs.addTextBoxCommandInput(
-        STATUS_INPUT_ID,
-        'Status',
-        'Select one or more sketch points.',
-        4,
-        True,
-    )
-
-    _refresh_status(inputs)
+    _refresh_description(inputs)
 
     futil.add_handler(args.command.execute, command_execute, local_handlers=local_handlers)
     futil.add_handler(args.command.inputChanged, command_input_changed, local_handlers=local_handlers)
@@ -466,8 +448,7 @@ def command_input_changed(args: adsk.core.InputChangedEventArgs):
         if preset_id:
             preset = get_preset(preset_id)
             _set_height_input_mm(args.inputs, preset.min_boss_height_mm)
-
-    _refresh_status(args.inputs)
+            _set_description(args.inputs, preset.screw_description)
 
 
 def command_validate_input(args: adsk.core.ValidateInputsEventArgs):

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 class ScrewBossPreset:
     id: str
     display_name: str
+    screw_description: str
     outer_diameter_mm: float
     min_boss_height_mm: float
     base_fillet_mm: float
