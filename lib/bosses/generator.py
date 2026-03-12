@@ -242,6 +242,59 @@ def _set_hole_position(hole_input, sketch_point: adsk.fusion.SketchPoint):
     raise RuntimeError('Hole input does not support setPositionBySketchPoint in this API version.')
 
 
+def _set_hole_position_by_point(hole_input, point: adsk.core.Point3D, top_face: adsk.fusion.BRepFace) -> bool:
+    if not hasattr(hole_input, 'setPositionByPoint'):
+        return False
+
+    # API variants differ: some accept only the point, others also accept a planar entity.
+    for args in ((point,), (point, top_face), (top_face, point)):
+        try:
+            hole_input.setPositionByPoint(*args)
+            return True
+        except Exception:
+            pass
+
+    return False
+
+
+def _set_hole_positions_by_points(
+    hole_input,
+    points: List[adsk.core.Point3D],
+    top_face: adsk.fusion.BRepFace,
+) -> bool:
+    if not points:
+        return False
+
+    # Single hole direct placement is often supported and avoids sketch creation.
+    if len(points) == 1 and _set_hole_position_by_point(hole_input, points[0], top_face):
+        return True
+
+    if not hasattr(hole_input, 'setPositionByPoints'):
+        return False
+
+    points_collection = adsk.core.ObjectCollection.create()
+    for point in points:
+        points_collection.add(point)
+
+    # API variants differ in accepted container and optional orientation argument.
+    candidate_args = (
+        (points,),
+        (points_collection,),
+        (points, top_face),
+        (points_collection, top_face),
+        (top_face, points),
+        (top_face, points_collection),
+    )
+    for args in candidate_args:
+        try:
+            hole_input.setPositionByPoints(*args)
+            return True
+        except Exception:
+            pass
+
+    return False
+
+
 def _set_flat_drill_point(hole_input):
     # In Fusion, a flat drill point corresponds to 180 degree tip angle.
     if hasattr(hole_input, 'tipAngle'):
@@ -274,14 +327,15 @@ def _create_counterbore_hole(
         relief_depth_cm,
     )
 
-    placement_sketch = component.sketches.add(top_face)
-    _configure_helper_sketch(placement_sketch, 'Screw Boss - Hole Positions')
-    if created_sketches is not None:
-        created_sketches.append(placement_sketch)
-    center_on_face = placement_sketch.modelToSketchSpace(hole_center_world)
-    sketch_point = placement_sketch.sketchPoints.add(center_on_face)
+    if not _set_hole_position_by_point(hole_input, hole_center_world, top_face):
+        placement_sketch = component.sketches.add(top_face)
+        _configure_helper_sketch(placement_sketch, 'Screw Boss - Hole Positions')
+        if created_sketches is not None:
+            created_sketches.append(placement_sketch)
+        center_on_face = placement_sketch.modelToSketchSpace(hole_center_world)
+        sketch_point = placement_sketch.sketchPoints.add(center_on_face)
+        _set_hole_position(hole_input, sketch_point)
 
-    _set_hole_position(hole_input, sketch_point)
     _set_hole_depth(hole_input, main_depth_cm)
     _set_flat_drill_point(hole_input)
     _set_simple_tap_type(hole_input)
@@ -306,6 +360,35 @@ def _create_counterbore_holes_batch(
         relief_diameter_cm,
         relief_depth_cm,
     )
+
+    # Common path: direct point positioning without creating helper sketches.
+    if _set_hole_positions_by_points(hole_input, hole_centers_world, top_face):
+        _set_hole_depth(hole_input, main_depth_cm)
+        _set_flat_drill_point(hole_input)
+        _set_simple_tap_type(hole_input)
+        hole_features.add(hole_input)
+        return
+
+    # Secondary path: create per-point hole features using direct point placement.
+    # This avoids helper sketches on API builds without setPositionByPoints.
+    all_direct = True
+    for center in hole_centers_world:
+        single_input = _create_counterbore_input(
+            hole_features,
+            main_diameter_cm,
+            relief_diameter_cm,
+            relief_depth_cm,
+        )
+        if not _set_hole_position_by_point(single_input, center, top_face):
+            all_direct = False
+            break
+        _set_hole_depth(single_input, main_depth_cm)
+        _set_flat_drill_point(single_input)
+        _set_simple_tap_type(single_input)
+        hole_features.add(single_input)
+
+    if all_direct:
+        return
 
     placement_sketch = component.sketches.add(top_face)
     _configure_helper_sketch(placement_sketch, 'Screw Boss - Hole Positions')
@@ -410,7 +493,7 @@ def generate_bosses(context: BossGenerationContext, points: Iterable[adsk.fusion
             if token is not None:
                 edge_tokens.add(token)
 
-    # 3) One hole feature for all centers (when API supports setPositionBySketchPoints).
+    # 3) One hole feature for all centers; prefers direct point placement, falls back to helper sketches.
     hole_top_face = _resolve_top_face_on_body(host_body, center_world_points[0], outer_radius_cm, height_cm)
     _create_counterbore_holes_batch(
         component,
